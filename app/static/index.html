@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Combo +EV</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>Combo +EV</h1>
+        <p class="sub">Kalshi correlated 2-leg combos · MLB + NFL</p>
+      </div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="scan">
+      <button id="scanBtn" class="primary">Scan now</button>
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><div id="progressFill"></div></div>
+        <span id="progressText"></span>
+      </div>
+    </div>
+  </header>
+
+  <section class="settings" id="settings">
+    <label>Bankroll <span class="pre">$</span><input type="number" step="50" min="0" data-key="bankroll"></label>
+    <label>Kelly fraction <input type="number" step="0.05" min="0" max="1" data-key="kelly_fraction"></label>
+    <label>Max per bet <input type="number" step="0.5" min="0" data-key="max_bet_pct" data-pct><span class="post">%</span></label>
+    <label>Max per game <input type="number" step="0.5" min="0" data-key="max_game_pct" data-pct><span class="post">%</span></label>
+    <details>
+      <summary>Scan settings</summary>
+      <div class="adv">
+        <label>Min lift vs independent <input type="number" step="0.05" data-key="min_lift"></label>
+        <label>Quotes per game <input type="number" step="1" data-key="max_quotes_per_game"></label>
+        <label>Max fair payout <input type="number" step="10" data-key="max_fair_x"><span class="post">x</span></label>
+        <label>Quote size <span class="pre">$</span><input type="number" step="1" data-key="quote_size_dollars"></label>
+        <label>Min leg prob <input type="number" step="0.01" data-key="min_leg_prob"></label>
+        <label>Max leg bid/ask spread <input type="number" step="0.01" data-key="max_leg_spread"></label>
+      </div>
+    </details>
+    <span class="saved" id="saved"></span>
+  </section>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="opps">Opportunities</button>
+    <button class="tab" data-tab="history">Bet history</button>
+  </nav>
+
+  <main>
+    <section id="opps" class="panel">
+      <div class="meta" id="scanMeta"></div>
+      <div class="filters">
+        <select id="fSport"><option value="">All sports</option><option>MLB</option><option>NFL</option></select>
+        <select id="fTemplate"><option value="">All combo types</option></select>
+        <select id="fGame"><option value="">All games</option></select>
+        <label class="maxx">Odds ≤ <input id="fMaxX" type="number" min="1" step="5" placeholder="any"> x</label>
+      </div>
+      <div class="table-wrap">
+        <table class="opps">
+          <thead>
+            <tr>
+              <th class="num">EV</th>
+              <th class="num">Bet</th>
+              <th>Combo</th>
+              <th>Game</th>
+              <th class="num" title="Kalshi payout per $1 (before fees for quotes)">Kalshi</th>
+              <th class="num" title="Model fair payout (95% range)">Fair</th>
+              <th class="num" title="Payout if legs were independent">Indep.</th>
+              <th class="num" title="Latent correlation · historical sample">ρ · n</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="oppRows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="oppEmpty">No scan yet. Hit <b>Scan now</b>.</p>
+    </section>
+
+    <section id="history" class="panel" hidden>
+      <div class="hist-head">
+        <div class="kpis" id="kpis"></div>
+        <button id="settleBtn">Refresh settlements</button>
+      </div>
+      <div class="table-wrap">
+        <table class="bets">
+          <thead>
+            <tr><th>Placed</th><th>Combo</th><th class="num">Stake</th><th class="num">Payout</th>
+              <th class="num">Model EV</th><th>Status</th><th class="num">P&amp;L</th><th></th></tr>
+          </thead>
+          <tbody id="betRows"></tbody>
+        </table>
+      </div>
+      <p class="empty" id="betEmpty">No bets logged yet. Use <b>Log bet</b> on a row after you place it on Kalshi.</p>
+      <h3>Maker pricing by combo type <span class="hint">· last 21 days of live quotes · Kalshi/fair &gt; 1 means makers pay more than the model's fair value</span></h3>
+      <div class="table-wrap">
+        <table class="stats"><thead><tr><th>Combo type</th><th>Sport</th><th class="num">Quotes</th>
+          <th class="num">Median Kalshi / fair</th><th class="num">+EV share</th><th>Quote budget</th></tr></thead>
+          <tbody id="statRows"></tbody></table>
+      </div>
+      <p class="empty" id="statsEmpty">No live quotes logged yet.</p>
+      <h3>Past scans</h3>
+      <div class="table-wrap">
+        <table class="scans"><thead><tr><th>#</th><th>Started</th><th>Mode</th><th class="num">Games</th>
+          <th class="num">Pairs</th><th class="num">Candidates</th><th class="num">Quoted</th><th>Status</th></tr></thead>
+          <tbody id="scanRows"></tbody></table>
+      </div>
+    </section>
+  </main>
+
+  <template id="detailTpl"><tr class="detail"><td colspan="9"><div class="detail-grid"></div></td></tr></template>
+  <script src="/static/app.js"></script>
+</body>
+</html>
