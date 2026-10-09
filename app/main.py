@@ -1,14 +1,16 @@
 """Local dashboard server: `make run`, then open http://localhost:8000."""
 
 import asyncio
+import hashlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import config, db
+from app.kalshi import trading
 from app.kalshi.client import KalshiClient
 from app.model.joint import Model
 from app.pricing import size_stakes
@@ -30,16 +32,52 @@ app = FastAPI(title="Combo +EV", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
+@app.middleware("http")
+async def no_stale_dashboard(request, call_next):
+    """Make the browser revalidate the page and its JS/CSS (ETags keep this cheap), so a cached old
+    app.js can't run against new settings."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+def build_hash() -> str:
+    """Short hash of the dashboard's script + styles; changes whenever either file changes."""
+    h = hashlib.sha256()
+    for name in ("app.js", "style.css"):
+        h.update((STATIC / name).read_bytes())
+    return h.hexdigest()[:10]
+
+
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    """The page, with versioned asset URLs so the browser can never run a stale cached script."""
+    build = build_hash()
+    html = (STATIC / "index.html").read_text()
+    html = html.replace("/static/app.js", f"/static/app.js?v={build}").replace(
+        "/static/style.css", f"/static/style.css?v={build}")
+    html = html.replace("<head>", f'<head>\n  <meta name="build" content="{build}">', 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/status")
-def status():
+async def status():
     model: Model = state["model"]
+    balance = None
+    if config.has_kalshi_auth():
+        client = KalshiClient()
+        try:
+            balance = await trading.balance(client)
+        except Exception:  # status must load even if Kalshi is unreachable
+            pass
+        finally:
+            await client.close()
     return {
         "auth": config.has_kalshi_auth(),
+        "balance": balance,
+        "auto_bet_mode": db.get_settings()["auto_bet_mode"],
+        "accept_side_set": config.KALSHI_ACCEPT_SIDE in ("yes", "no"),
         "env": config.KALSHI_ENV,
         "fee_rate": config.FEE_RATE,
         "history": {"NFL": model.has("NFL"), "MLB": model.has("MLB")},
@@ -47,6 +85,7 @@ def status():
         "creation_limit": config.WEEKLY_COMBO_CREATION_LIMIT,
         "running_scan": state["running"],
         "latest_scan": db.latest_scan_id(),
+        "build": build_hash(),
     }
 
 
@@ -54,7 +93,7 @@ def status():
 async def start_scan():
     if state["running"] is not None:
         return {"scan_id": state["running"]}
-    scan_id = db.create_scan("live" if config.has_kalshi_auth() else "model")
+    scan_id = db.create_scan("live" if config.has_kalshi_auth() else "model", db.get_settings()["auto_bet_mode"])
     state["running"] = scan_id
 
     async def runner():
@@ -98,7 +137,12 @@ def get_settings():
 
 @app.put("/api/settings")
 def put_settings(values: dict):
-    return db.update_settings(values)
+    if values.get("auto_bet_mode") == "live" and config.KALSHI_ACCEPT_SIDE not in ("yes", "no"):
+        raise HTTPException(400, "Run `make side-test` and set KALSHI_ACCEPT_SIDE in .env before going live")
+    try:
+        return db.update_settings(values)
+    except ValueError as e:  # e.g. a null/NaN from a stale dashboard script
+        raise HTTPException(400, str(e))
 
 
 class BetIn(BaseModel):
@@ -136,14 +180,15 @@ async def settle_bets():
         for bet in db.list_bets():
             if bet["status"] != "open":
                 continue
-            results = []
+            outcomes = []  # per leg: True won / False lost / None unresolved
             for leg in (bet["data"]["leg_a"], bet["data"]["leg_b"]):
                 m = (await client.get(f"/markets/{leg['ticker']}")).get("market", {})
-                results.append(m.get("result") or "")
-            if "no" in results:
+                result = m.get("result") or ""
+                outcomes.append(None if result not in ("yes", "no") else result == leg.get("side", "yes"))
+            if False in outcomes:
                 db.settle_bet(bet["id"], "lost", -bet["stake"])
                 settled += 1
-            elif results == ["yes", "yes"]:
+            elif outcomes == [True, True]:
                 db.settle_bet(bet["id"], "won", round(bet["stake"] * (bet["payout_x"] - 1), 2))
                 settled += 1
     finally:

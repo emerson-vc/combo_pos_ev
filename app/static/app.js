@@ -51,6 +51,7 @@ function priced(r) {
 async function loadStatus() {
   state.status = await api("/api/status");
   const st = state.status;
+  checkBuild(st.build);
   const pills = [
     st.auth ? `<span class="pill ok">Kalshi <b>live quotes</b> · ${st.env}</span>`
             : `<span class="pill warn" title="Add KALSHI_KEY_ID + key file to .env">Model-only · no API key</span>`,
@@ -58,33 +59,79 @@ async function loadStatus() {
     `<span class="pill ${st.history.MLB ? "ok" : "warn"}">MLB history ${st.history.MLB ? "✓" : "missing"}</span>`,
     `<span class="pill">Combos created this week <b>${st.creations_this_week.toLocaleString()}</b> / ${st.creation_limit.toLocaleString()}</span>`,
   ];
+  if (st.balance != null) pills.push(`<span class="pill">Kalshi balance <b>${fmtUsd(st.balance)}</b></span>`);
+  const modeLabel = { off: "Auto-bet off", dry_run: "Auto-bet: dry run", live: "Auto-bet: LIVE" }[st.auto_bet_mode]
+    ?? `Auto-bet: ${esc(st.auto_bet_mode)} (not active)`;
+  pills.push(`<span class="pill ${st.auto_bet_mode === "live" ? "live" : st.auto_bet_mode === "dry_run" ? "warn" : ""}">${modeLabel}</span>`);
   $("#status").innerHTML = pills.join("");
   return st;
 }
 
+// The page's script must match the server's: a stale cached script once saved Live as an empty value.
+function checkBuild(serverBuild) {
+  const pageBuild = document.querySelector('meta[name="build"]')?.content;
+  if (!serverBuild || pageBuild === serverBuild) return;
+  if (!$("#staleBanner")) {
+    document.body.insertAdjacentHTML("afterbegin",
+      `<div id="staleBanner" class="stale">Dashboard updated - <button onclick="location.reload()">Reload</button> before changing settings or scanning.</div>`);
+  }
+  $("#scanBtn").disabled = true;
+  document.querySelectorAll("[data-key]").forEach((el) => (el.disabled = true));
+}
+
 async function loadSettings() {
-  state.settings = await api("/api/settings");
+  applySettings(await api("/api/settings"));
+}
+
+// Show exactly what the server stored (a rejected or partial save never leaves the UI lying).
+function applySettings(settings) {
+  state.settings = settings;
   document.querySelectorAll("[data-key]").forEach((el) => {
+    if (el === document.activeElement && el.tagName !== "SELECT") return;  // don't fight typing
     const v = state.settings[el.dataset.key];
-    el.value = el.hasAttribute("data-pct") ? +(v * 100).toFixed(2) : v;
+    if (el.type === "checkbox") el.checked = !!v;
+    else el.value = el.hasAttribute("data-pct") ? +(v * 100).toFixed(2) : v;
   });
 }
 
 let saveTimer;
 function onSettingInput(e) {
   const el = e.target;
-  if (!el.dataset.key || el.value === "") return;
-  let v = parseFloat(el.value);
+  if (!el.dataset.key || (el.type !== "checkbox" && el.value === "")) return;
+  if (el.tagName === "SELECT") return saveSelect(el);
+  let v = el.type === "checkbox" ? el.checked : parseFloat(el.value);
   if (el.hasAttribute("data-pct")) v /= 100;
   state.settings[el.dataset.key] = v;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
-    state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify({ [el.dataset.key]: v }) });
+    try {
+      applySettings(await api("/api/settings", { method: "PUT", body: JSON.stringify({ [el.dataset.key]: v }) }));
+    } catch (err) {
+      alert(err.message.replace(/^\d+ /, ""));
+      return loadSettings();
+    }
     $("#saved").textContent = "Saved";
     $("#saved").classList.add("show");
     setTimeout(() => $("#saved").classList.remove("show"), 1200);
     if (state.scan) await loadScan(state.scan.id);
   }, 350);
+}
+
+async function saveSelect(el) {
+  const prev = state.settings[el.dataset.key];
+  if (el.value === "live" && !confirm(
+      "Go LIVE? Scans you start will place real Kalshi bets automatically when a combo's pessimistic EV " +
+      `beats ${(state.settings.min_pess_ev * 100).toFixed(0)}%, max ${state.settings.max_bets_per_game} per game.`)) {
+    el.value = prev;
+    return;
+  }
+  try {
+    applySettings(await api("/api/settings", { method: "PUT", body: JSON.stringify({ [el.dataset.key]: el.value }) }));
+  } catch (err) {
+    alert(err.message.replace(/^\d+ /, ""));
+    await loadSettings();
+  }
+  loadStatus();
 }
 
 // ---------- scans ----------
@@ -125,6 +172,7 @@ function renderOpps() {
   $("#scanMeta").innerHTML =
     `Scan #${scan.id} · ${new Date(scan.started_at).toLocaleString()} · <b>${scan.mode === "live" ? "live Kalshi quotes" : "model-only"}</b> · ` +
     `${scan.n_games} games · ${scan.n_pairs.toLocaleString()} pairs modeled · ${rows.length} candidates · ` +
+    `auto-bet: <b>${{ live: "LIVE", dry_run: "dry run", off: "off" }[scan.auto_bet_mode] ?? "off"}</b> · ` +
     `${nPriced} priced · <b>${nPos} +EV</b>` +
     (scan.mode === "model" ? ` · <span class="flag">enter the payout from the Kalshi app in the Kalshi column to price a row</span>` : "");
 
@@ -149,7 +197,7 @@ function renderOpps() {
     tr.className = `row${pr ? "" : " model-only"}`;
     const evCls = pr ? (pr.ev > 0 ? "pos" : "neg") : "";
     const leg = (l) =>
-      `<div class="leg"><span>${esc(l.label)}</span><span class="p" title="${l.p_source === "ladder" ? "Thin market: priced from the player's liquid lower rung" : "Kalshi bid/ask midpoint"}">${l.p_source === "ladder" ? "≈" : ""}${fmtP(l.p ?? l.mid)}</span><span class="role">${esc(l.role)}</span></div>`;
+      `<div class="leg"><span>${esc(l.label)}</span><span class="p" title="${LEG_SOURCE[l.p_source] ?? LEG_SOURCE.market}">${l.p_source && l.p_source !== "market" ? "≈" : ""}${fmtP(l.p ?? l.mid)}</span><span class="role">${esc(l.role)}</span></div>`;
     const kalshiCell = r.ev != null
       ? `${fmtX(r.kalshi_x)}<small>${r.quote_source} · ${age(r.quoted_at)}</small>`
       : `<input type="number" step="0.1" min="1" placeholder="app x" value="${state.manual[r.result_id] ?? ""}" data-rid="${r.result_id}">` +
@@ -193,9 +241,18 @@ function fillFilter(sel, pairs) {
   el.value = uniq.some(([v]) => v === cur) ? cur : "";
 }
 
+const LEG_SOURCE = {
+  market: "Kalshi bid/ask midpoint",
+  ladder: "Thin market: priced from the player's liquid lower rung",
+  curve: "Thin market: priced from a curve through the rungs that trade",
+};
+
 function legDetail(l) {
   const book = `bid ${l.yes_bid.toFixed(2)} / ask ${l.yes_ask.toFixed(2)}`;
-  return l.p_source === "ladder" ? `${l.label} · ${book} (thin) → ladder ${fmtP(l.p)}` : `${l.label} · ${book}`;
+  const lo = l.p_lo != null ? ` · pessimistic ${fmtP(l.p_lo)}` : "";
+  return l.p_source && l.p_source !== "market"
+    ? `${l.label} · ${book} (thin) → ${l.p_source} ${fmtP(l.p)}${lo}`
+    : `${l.label} · ${book}${lo}`;
 }
 
 function detailRow(r) {
@@ -218,6 +275,7 @@ function detailRow(r) {
   if (r.kalshi_price != null) items.push(["Quote YES price", `$${r.kalshi_price.toFixed(4)} + fee → $${r.kalshi_cost.toFixed(4)}`]);
   if (r.pred_ev != null) items.push(["Predicted EV before quoting", fmtPct(r.pred_ev)]);
   if (r.combo_ticker) items.push(["Combo ticker", r.combo_ticker]);
+  if (r.auto_bet) items.push(["Auto-bet", `${r.auto_bet.status}: ${r.auto_bet.reason}`]);
   const grid = node.querySelector(".detail-grid");
   grid.innerHTML = items.map(([k, v]) => `<div>${esc(k)}<br><b>${esc(v)}</b></div>`).join("");
   if (r.raw_quotes && r.raw_quotes.length) {
@@ -247,6 +305,7 @@ async function loadBets() {
     const ev = d.q * b.payout_x - 1;
     return `<tr>
       <td>${new Date(b.placed_at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td>
+      <td><span class="tag ${b.source}">${b.source}</span></td>
       <td><div class="legs"><div class="leg">${esc(d.leg_a.label)}</div><div class="leg">${esc(d.leg_b.label)}</div></div>
           <div class="tmpl">${esc(d.game_label)}</div></td>
       <td class="num mono">${fmtUsd(b.stake)}</td>
@@ -262,14 +321,18 @@ async function loadBets() {
     loadBets();
   }));
 
-  const settled = bets.filter((b) => b.status !== "open");
-  const staked = bets.reduce((s, b) => s + b.stake, 0);
+  const real = bets.filter((b) => b.source !== "paper");
+  const paper = bets.filter((b) => b.source === "paper");
+  const settled = real.filter((b) => b.status !== "open");
+  const staked = real.reduce((s, b) => s + b.stake, 0);
   const pnl = settled.reduce((s, b) => s + b.pnl, 0);
   const settledStake = settled.reduce((s, b) => s + b.stake, 0);
-  const expected = bets.reduce((s, b) => s + b.stake * (b.data.q * b.payout_x - 1), 0);
+  const expected = real.reduce((s, b) => s + b.stake * (b.data.q * b.payout_x - 1), 0);
+  const paperPnl = paper.filter((b) => b.status !== "open").reduce((s, b) => s + b.pnl, 0);
   $("#kpis").innerHTML = [
-    ["Bets", bets.length], ["Staked", fmtUsd(staked)], ["Model expected P&L", fmtUsd(expected)],
+    ["Bets", real.length], ["Staked", fmtUsd(staked)], ["Model expected P&L", fmtUsd(expected)],
     ["Realized P&L", fmtUsd(pnl)], ["ROI (settled)", settledStake ? fmtPct(pnl / settledStake) : "—"],
+    ...(paper.length ? [["Paper bets", paper.length], ["Paper P&L", fmtUsd(paperPnl)]] : []),
   ].map(([k, v]) => `<div class="kpi"><span>${k}</span><b>${v}</b></div>`).join("");
 
   const stats = await api("/api/quote-stats");

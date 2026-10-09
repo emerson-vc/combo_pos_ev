@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: setup ingest ingest-mlb ingest-mlb-lines ingest-nfl discover run test backtest
+.PHONY: setup ingest ingest-mlb ingest-mlb-lines ingest-nfl discover run test backtest side-test
 
 setup:
 	python3 -m venv .venv
@@ -20,6 +20,10 @@ ingest-mlb-lines:
 
 discover:
 	$(PY) -m app.kalshi.discovery
+
+# One real $1 bet to learn which accepted_side buys YES. Without CONFIRM=1 it only explains.
+side-test:
+	$(PY) -m app.kalshi.side_test $(if $(CONFIRM),--confirm,)
 
 backtest:
 	$(PY) -m app.model.backtest

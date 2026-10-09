@@ -81,7 +81,8 @@ class KalshiClient:
                 resp = await self._http.request(method, self.base_url + path, params=params, json=json,
                                                 headers=headers)
             except httpx.TransportError:  # dropped connection / timeout: back off and retry
-                if attempt == 3 or method == "POST":  # a retried POST could create a duplicate RFQ
+                # Never retry writes: a retried POST/PUT could duplicate an RFQ or accept a quote twice.
+                if attempt == 3 or method not in ("GET", "DELETE"):
                     raise
                 await asyncio.sleep(2.0 * (attempt + 1))
                 if self.has_auth:
@@ -102,6 +103,9 @@ class KalshiClient:
 
     async def post(self, path, json):
         return await self.request("POST", path, json=json, auth=True)
+
+    async def put(self, path, json):
+        return await self.request("PUT", path, json=json, auth=True)
 
     async def delete(self, path):
         return await self.request("DELETE", path, auth=True)

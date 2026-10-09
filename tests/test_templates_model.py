@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -5,7 +7,6 @@ import pytest
 from app.config import DEFAULT_SETTINGS
 from app.legs import Leg
 from app.model.joint import Model
-from app.templates import pairs_for_game
 
 
 def leg(kind, team, mid, player=None, threshold=None, sport="NFL"):
@@ -13,16 +14,39 @@ def leg(kind, team, mid, player=None, threshold=None, sport="NFL"):
                player, threshold, mid - 0.005, mid + 0.005, f"{player or team} {kind} {threshold}")
 
 
-def test_templates_same_team_only():
-    legs = [leg("td", "DAL", 0.3, "A", 0.5), leg("team_total", "DAL", 0.5, threshold=28.5),
-            leg("team_total", "TB", 0.5, threshold=20.5), leg("pass_yds", "DAL", 0.4, "Q", 274.5),
-            leg("team_spread", "DAL", 0.4, threshold=6.5)]
-    pairs = pairs_for_game(legs, ["TB", "DAL"], DEFAULT_SETTINGS)
-    assert all(a.team == b.team for _, a, b in pairs)
-    templates = {t for t, *_ in pairs}
-    assert templates == {"nfl_skill_tt", "nfl_spread_tt", "nfl_spread_player", "nfl_qb_rec"}
-    assert all(a.kind not in ("team_win", "team_spread", "team_total") or b.kind in ("team_win", "team_spread", "team_total")
-               for _, a, b in pairs)  # player leg always first
+class StubModel:
+    """atlas_rho stand-in: everything correlates except pairs involving a 'junk' player."""
+    def atlas_rho(self, a, b):
+        return 0.0 if "junk" in (a.player or "", b.player or "") else 0.5
+
+
+def test_search_relationships_and_screens():
+    from app.pairs import candidate_pairs, relationship
+    td = leg("td", "DAL", 0.3, "Runner", 0.5)
+    yds = dataclasses.replace(leg("rush_yds", "DAL", 0.3, "Runner", 69.5), event_ticker="E-yds")
+    team_tt = leg("team_total", "DAL", 0.3, threshold=28.5)
+    opp_tt = leg("team_total", "TB", 0.3, threshold=20.5)
+    game = leg("game_total", None, 0.3, threshold=48.5)
+    mate = dataclasses.replace(leg("rec_yds", "DAL", 0.3, "Catcher", 79.5), event_ticker="E-rec")
+    junk = dataclasses.replace(leg("rec", "DAL", 0.3, "junk", 4.5), event_ticker="E-junk")
+    fav = dataclasses.replace(leg("team_win", "DAL", 0.8), event_ticker="E-win")
+    assert relationship(td, yds) == "same_player"
+    assert relationship(td, mate) == "teammates"
+    assert relationship(td, team_tt) == "player_team"
+    assert relationship(td, opp_tt) is None  # opposing side not searched
+    assert relationship(team_tt, game) == "game_team"
+    pairs = candidate_pairs([td, yds, team_tt, opp_tt, game, mate, junk, fav], ["TB", "DAL"], StubModel(),
+                            DEFAULT_SETTINGS)
+    ids = {t for t, *_ in pairs}
+    assert "nfl:same_player:td+rush_yds" in ids and "nfl:player_team:td+team_total" in ids
+    assert not any("junk" in (a.player or "") + (b.player or "") for _, a, b in pairs)  # atlas screen
+    assert not any(b is opp_tt or a is opp_tt for _, a, b in pairs if a.kind in ("td", "rush_yds"))
+    assert all(_scope_ok(a, b) for _, a, b in pairs)
+
+
+def _scope_ok(a, b):
+    from app.pairs import _scope
+    return _scope(a) <= _scope(b)  # player leg first, game leg last
 
 
 @pytest.fixture

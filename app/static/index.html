@@ -32,12 +32,25 @@
     <label>Kelly fraction <input type="number" step="0.05" min="0" max="1" data-key="kelly_fraction"></label>
     <label>Max per bet <input type="number" step="0.5" min="0" data-key="max_bet_pct" data-pct><span class="post">%</span></label>
     <label>Max per game <input type="number" step="0.5" min="0" data-key="max_game_pct" data-pct><span class="post">%</span></label>
+    <label class="check"><input type="checkbox" data-key="always_quote_hr_ml"> Always quote 2+ HR + team ML</label>
+    <div class="autobet">
+      <label>Auto-bet
+        <select data-key="auto_bet_mode">
+          <option value="off">Off</option><option value="dry_run">Dry run (paper)</option><option value="live">Live</option>
+        </select>
+      </label>
+      <label>Pessimistic EV &gt; <input type="number" step="1" min="0" data-key="min_pess_ev" data-pct><span class="post">%</span></label>
+      <label>Max bets/game <input type="number" step="1" min="0" data-key="max_bets_per_game"></label>
+      <label>Daily max <input type="number" step="1" min="0" data-key="daily_max_spend_pct" data-pct><span class="post">% of balance</span></label>
+    </div>
     <details>
       <summary>Scan settings</summary>
       <div class="adv">
         <label>Min lift vs independent <input type="number" step="0.05" data-key="min_lift"></label>
         <label>Quotes per game <input type="number" step="1" data-key="max_quotes_per_game"></label>
         <label>Max fair payout <input type="number" step="10" data-key="max_fair_x"><span class="post">x</span></label>
+        <label>MLB max fair payout <input type="number" step="10" data-key="mlb_max_fair_x"><span class="post">x</span></label>
+        <label>2+ HR + ML max fair <input type="number" step="10" data-key="pinned_max_fair_x"><span class="post">x</span></label>
         <label>Quote size <span class="pre">$</span><input type="number" step="1" data-key="quote_size_dollars"></label>
         <label>Min leg prob <input type="number" step="0.01" data-key="min_leg_prob"></label>
         <label>Max leg bid/ask spread <input type="number" step="0.01" data-key="max_leg_spread"></label>
@@ -89,7 +102,7 @@
       <div class="table-wrap">
         <table class="bets">
           <thead>
-            <tr><th>Placed</th><th>Combo</th><th class="num">Stake</th><th class="num">Payout</th>
+            <tr><th>Placed</th><th>Source</th><th>Combo</th><th class="num">Stake</th><th class="num">Payout</th>
               <th class="num">Model EV</th><th>Status</th><th class="num">P&amp;L</th><th></th></tr>
           </thead>
           <tbody id="betRows"></tbody>

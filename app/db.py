@@ -1,6 +1,7 @@
 """SQLite persistence: settings, scan history, results, combo-ticker cache, bet log."""
 
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,7 @@ CREATE TABLE IF NOT EXISTS combo_tickers (
     legs_key TEXT PRIMARY KEY, collection TEXT NOT NULL, market_ticker TEXT NOT NULL,
     event_ticker TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS combo_legs (combo_ticker TEXT PRIMARY KEY, legs TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS bets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     placed_at TEXT NOT NULL, result_id INTEGER, data TEXT NOT NULL,
@@ -50,34 +52,75 @@ def connect():
         conn.close()
 
 
+# Columns added after the first release; added in place on older databases.
+ADDED_COLUMNS = {
+    "bets": {"source": "TEXT NOT NULL DEFAULT 'manual'", "combo_ticker": "TEXT", "game": "TEXT",
+             "contracts": "REAL"},
+    "scans": {"auto_bet_mode": "TEXT"},
+}
+
+
 def init():
     with connect() as c:
         c.executescript(SCHEMA)
+        for table, cols in ADDED_COLUMNS.items():
+            have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            for col, decl in cols.items():
+                if col not in have:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
 
 # ---- settings ---------------------------------------------------------------------------------
 
+AUTO_BET_MODES = ("off", "dry_run", "live")
+
+
+def coerce_setting(key: str, value):
+    """Validate a settings value against its default's type; raises ValueError on anything else."""
+    default = config.DEFAULT_SETTINGS[key]
+    if isinstance(default, bool):
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false")
+        return value
+    if isinstance(default, (int, float)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{key} must be a number")
+        return type(default)(value)
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be text")
+    if key == "auto_bet_mode" and value not in AUTO_BET_MODES:
+        raise ValueError("auto_bet_mode must be off, dry_run or live")
+    return value
+
+
 def get_settings() -> dict:
     with connect() as c:
         stored = {r["key"]: json.loads(r["value"]) for r in c.execute("SELECT key, value FROM settings")}
-    return {**config.DEFAULT_SETTINGS, **{k: v for k, v in stored.items() if k in config.DEFAULT_SETTINGS}}
+    out = dict(config.DEFAULT_SETTINGS)
+    for k, v in stored.items():
+        if k not in out:
+            continue
+        try:
+            out[k] = coerce_setting(k, v)
+        except ValueError:  # a bad stored value (e.g. an old "None" mode) falls back to the safe default
+            pass
+    return out
 
 
 def update_settings(values: dict) -> dict:
+    clean = {k: coerce_setting(k, v) for k, v in values.items() if k in config.DEFAULT_SETTINGS}
     with connect() as c:
-        for k, v in values.items():
-            if k in config.DEFAULT_SETTINGS:
-                c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                          (k, json.dumps(type(config.DEFAULT_SETTINGS[k])(v))))
+        for k, v in clean.items():
+            c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (k, json.dumps(v)))
     return get_settings()
 
 
 # ---- scans + results --------------------------------------------------------------------------
 
-def create_scan(mode: str) -> int:
+def create_scan(mode: str, auto_bet_mode: str = "off") -> int:
     with connect() as c:
-        return c.execute("INSERT INTO scans (started_at, status, mode) VALUES (?, 'running', ?)",
-                         (now_iso(), mode)).lastrowid
+        return c.execute("INSERT INTO scans (started_at, status, mode, auto_bet_mode) VALUES (?, 'running', ?, ?)",
+                         (now_iso(), mode, auto_bet_mode)).lastrowid
 
 
 def finish_scan(scan_id: int, status: str, error: str | None = None, **counts):
@@ -152,18 +195,51 @@ def put_combo_ticker(legs_key: str, collection: str, market_ticker: str, event_t
                   (legs_key, collection, market_ticker, event_ticker, now_iso()))
 
 
+def rejected_combo_keys() -> set[str]:
+    with connect() as c:
+        return {r[0] for r in c.execute("SELECT legs_key FROM combo_tickers WHERE market_ticker = 'REJECTED'")}
+
+
 def creations_this_week() -> int:
     since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
     with connect() as c:
-        return c.execute("SELECT COUNT(*) FROM combo_tickers WHERE created_at >= ?", (since,)).fetchone()[0]
+        return c.execute("SELECT COUNT(*) FROM combo_tickers WHERE created_at >= ? AND market_ticker != 'REJECTED'",
+                         (since,)).fetchone()[0]
 
 
 # ---- bets -------------------------------------------------------------------------------------
 
-def add_bet(result_id: int | None, data: dict, stake: float, payout_x: float) -> int:
+def add_bet(result_id: int | None, data: dict, stake: float, payout_x: float, source: str = "manual",
+            combo_ticker: str | None = None, game: str | None = None, contracts: float | None = None) -> int:
     with connect() as c:
-        return c.execute("INSERT INTO bets (placed_at, result_id, data, stake, payout_x) VALUES (?, ?, ?, ?, ?)",
-                         (now_iso(), result_id, json.dumps(data, default=str), stake, payout_x)).lastrowid
+        return c.execute(
+            """INSERT INTO bets (placed_at, result_id, data, stake, payout_x, source, combo_ticker, game, contracts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (now_iso(), result_id, json.dumps(data, default=str), stake, payout_x, source, combo_ticker, game,
+             contracts)).lastrowid
+
+
+def today_auto_spend(source: str) -> float:
+    """Dollars staked today (UTC) by auto-betting of the given source ("auto" or "paper")."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    with connect() as c:
+        return c.execute("SELECT COALESCE(SUM(stake), 0) FROM bets WHERE source = ? AND placed_at >= ?",
+                         (source, today)).fetchone()[0]
+
+
+def bet_tickers(source: str) -> set[str]:
+    with connect() as c:
+        return {r[0] for r in c.execute("SELECT combo_ticker FROM bets WHERE source = ? AND combo_ticker IS NOT NULL",
+                                        (source,))}
+
+
+def bets_by_game(source: str) -> dict[str, list[dict]]:
+    """Open bets of a source grouped by game key (paper bets stand in for held positions in dry runs)."""
+    out: dict[str, list[dict]] = {}
+    for b in list_bets():
+        if b["source"] == source and b["status"] == "open" and b["game"]:
+            out.setdefault(b["game"], []).append(b)
+    return out
 
 
 def list_bets() -> list[dict]:
@@ -174,6 +250,17 @@ def list_bets() -> list[dict]:
 def settle_bet(bet_id: int, status: str, pnl: float):
     with connect() as c:
         c.execute("UPDATE bets SET status = ?, pnl = ?, settled_at = ? WHERE id = ?", (status, pnl, now_iso(), bet_id))
+
+
+def get_combo_legs(combo_ticker: str) -> list[dict] | None:
+    with connect() as c:
+        row = c.execute("SELECT legs FROM combo_legs WHERE combo_ticker = ?", (combo_ticker,)).fetchone()
+    return json.loads(row["legs"]) if row else None
+
+
+def put_combo_legs(combo_ticker: str, legs: list[dict]):
+    with connect() as c:
+        c.execute("INSERT OR REPLACE INTO combo_legs VALUES (?, ?)", (combo_ticker, json.dumps(legs)))
 
 
 def delete_bet(bet_id: int):

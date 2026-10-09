@@ -23,11 +23,18 @@ Without a key the app runs in **model-only** mode. You type the payout the Kalsh
 
 1. **Discover**: every open MLB/NFL game on Kalshi in the next ~2 days (MLB) / ~8 days (NFL), and
    all single-leg markets for it (team win/spread/total, player HR/hits/RBI/TB/H+R+RBI, TDs, yards...).
-2. **Pair**: the chosen templates generate same-team 2-leg combos (batter + team wins, skill
-   player + team total, QB + receiver stack, spread + team total/player, ...).
-3. **Model**: each leg's probability = Kalshi bid/ask midpoint, except thin long-shot rungs
-   (2+ HR at 0¢/1¢, 3+ TD...) which are priced from the player's liquid lower rung with a
-   dispersion-corrected Poisson ladder (shown as `≈` on the dashboard). The joint probability uses a
+2. **Pair**: every pair of legs in a game is considered (`app/pairs.py`): same player two stats,
+   teammates, player + own team, player + game, team + team, game + team, game + game (plus pitcher
+   Ks + opponent UNDER). Pairs survive if their legs are in different Kalshi events, they pay ≥ 3x
+   if independent, and a correlation atlas (rank correlation of the underlying stats on history)
+   is ≥ 0.15. Combo types are generated (e.g. "Same player: TDs + rush yds"). Combos Kalshi
+   rejects as duplicated legs are remembered and skipped.
+3. **Model**: each leg's probability = Kalshi bid/ask midpoint, except thin rungs: count props
+   (2+ HR at 0¢/1¢, 3+ TD...) are priced from the player's liquid lower rung with a
+   dispersion-corrected Poisson ladder, and line ladders (team totals, spreads, half/quarter lines,
+   yardage) from a logit curve through the rungs that trade (both shown as `≈`). Legs with no bid
+   and no curve/ladder price are dropped. **Pessimistic EV** prices each leg conservatively (its
+   bid, or the curve/ladder value minus 30%) on top of the correlation's 95% range. The joint probability uses a
    Gaussian copula whose correlation ρ is fit on the last 3+ seasons of history: the same
    role (WR1/RB1/TE1/QB1, lineup slot), the same count threshold (3+ TDs), or a quantile-matched
    threshold for yardage and team scoring. Team outcomes are measured vs pre-game expectation:
@@ -40,6 +47,15 @@ Without a key the app runs in **model-only** mode. You type the payout the Kalsh
    send an RFQ for `quote_size` dollars, take the best maker quote, delete the RFQ.
 6. **Price**: EV = q / (price + fee) − 1, with fee = 0.07·P·(1−P). Stake = Kelly fraction × full
    Kelly × bankroll, capped per bet and per game.
+
+## Auto-betting (off by default)
+
+Settings bar → **Auto-bet**: Off / Dry run (paper bets) / Live. Only runs during scans you start:
+pessimistic EV > 10% (rechecked on a fresh quote at the real stake), at most 2 combos per game
+counting combos already held on Kalshi, no shared legs, MLB hitters must be in the posted lineup,
+quarter Kelly from the real Kalshi balance (2%/bet, 5%/game, $1 minimum), daily cap 10% of balance.
+Bets land in Bet history tagged Auto/Paper and settle automatically. Live requires
+`KALSHI_ACCEPT_SIDE` in `.env` (confirmed `no` by `make side-test CONFIRM=1`, a real $1 bet).
 
 ## Caveats
 

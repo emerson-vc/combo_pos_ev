@@ -6,21 +6,24 @@ from collections import Counter
 
 import httpx
 
-from app import config, db
+from app import autobet, config, db
 from app.kalshi.client import KalshiClient
-from app.kalshi.combos import quote_combo
+from app.kalshi.combos import legs_key, quote_combo
 from app.kalshi.discovery import discover, find_combo_collection
 from app.legs import ET, Leg
 from app.model.joint import Model, norm_name
 from app.pricing import all_in_cost, ev_pct, kelly_fraction, size_stakes
 from app.quote_policy import MIN_FIT, QuotePolicy
-from app.templates import TEMPLATE_NAMES, pairs_for_game
+from app.pairs import candidate_pairs, template_name
+from app.templates import PINNED_TEMPLATE
 
 PROGRESS: dict[int, dict] = {}
 # Per game: max candidates sharing one long-shot leg, so quotes aren't spent on near-duplicates
 # (e.g. Lamb 3+ TD against six different team totals).
 PER_LEG_CAP = 3
 EXPLORE_SHARE = 0.2  # of each game's quote slots, reserved for learning about less-quoted combo types
+MLB_LONGSHOT_SHARE = 0.4  # of each MLB game's quote slots, reserved for combos with a long-shot leg
+LONGSHOT_P = 0.05
 QUOTE_CONCURRENCY = 5
 
 
@@ -77,25 +80,43 @@ def _round_robin(game_rows: list[dict], limit: int, per_leg: Counter) -> list[di
     return kept
 
 
-def pick_diverse(game_rows: list[dict], limit: int, policy: QuotePolicy | None = None) -> list[dict]:
-    """Choose which candidates get a Kalshi quote.
-
-    With a fitted policy: most slots go to the highest predicted EV (from how makers have priced
-    each combo type before); EXPLORE_SHARE stays round-robin so new/rare types keep getting data.
-    """
-    per_leg = Counter()
-    if policy is None or not policy.ready:
-        return _round_robin(game_rows, limit, per_leg)
-    for r in game_rows:
-        r["pred_ev"] = policy.predicted_ev(r)
-    n_explore = max(1, round(limit * EXPLORE_SHARE))
+def _take(rows: list[dict], n: int, per_leg: Counter) -> list[dict]:
     kept = []
-    for r in sorted((r for r in game_rows if r["pred_ev"] is not None), key=lambda r: -r["pred_ev"]):
-        if len(kept) >= limit - n_explore:
+    for r in rows:
+        if len(kept) >= n:
             break
         if per_leg[_long_leg(r)] < PER_LEG_CAP:
             per_leg[_long_leg(r)] += 1
             kept.append(r)
+    return kept
+
+
+def pick_diverse(game_rows: list[dict], limit: int, policy: QuotePolicy | None = None,
+                 longshot_share: float = 0.0) -> list[dict]:
+    """Choose which candidates get a Kalshi quote.
+
+    1. `longshot_share` of slots go to combos with a long-shot leg (p <= LONGSHOT_P), the shape of
+       the edges found by hand (2+ HR + team win).
+    2. With a fitted policy, most remaining slots go to the highest predicted EV (from how makers
+       priced each combo type before); EXPLORE_SHARE stays round-robin so rare types keep getting data.
+    """
+    per_leg = Counter()
+    ready = policy is not None and policy.ready
+    if ready:
+        for r in game_rows:
+            r["pred_ev"] = policy.predicted_ev(r)
+    kept = []
+    if longshot_share > 0:
+        longshots = [r for r in game_rows if min(r["p_a"], r["p_b"]) <= LONGSHOT_P]
+        longshots.sort(key=lambda r: (r.get("pred_ev") is None, -(r.get("pred_ev") or 0), -r["lift"]))
+        kept += _take(longshots, round(limit * longshot_share), per_leg)
+    taken = {id(r) for r in kept}
+    rest = [r for r in game_rows if id(r) not in taken]
+    if not ready:
+        return kept + _round_robin(rest, limit - len(kept), per_leg)
+    n_exploit = limit - len(kept) - max(1, round(limit * EXPLORE_SHARE))
+    kept += _take(sorted((r for r in rest if r["pred_ev"] is not None), key=lambda r: -r["pred_ev"]),
+                  max(n_exploit, 0), per_leg)
     # Explore: combo types without enough logged quotes to fit first, then anything left.
     for pool in ([r for r in game_rows if policy.count[r["template"]] < MIN_FIT], game_rows):
         taken = {id(r) for r in kept}
@@ -106,37 +127,47 @@ def pick_diverse(game_rows: list[dict], limit: int, policy: QuotePolicy | None =
 def build_candidates(games, model: Model, settings: dict, combinable: set[str] | None,
                       policy: QuotePolicy | None = None) -> tuple[list[dict], int]:
     rows, n_pairs = [], 0
+    rejected = db.rejected_combo_keys()
     for g in games:
         if not model.has(g.sport):
             continue
-        pairs = pairs_for_game(model.ladder.apply(g.legs), g.teams, settings)
+        pairs = candidate_pairs(model.ladder.apply(g.legs), g.teams, model, settings)
+        pairs = [(t, a, b) for t, a, b in pairs if legs_key(a, b) not in rejected]
         n_pairs += len(pairs)
         game_rows = []
         for template, a, b in pairs:
             if combinable is not None and not (a.event_ticker in combinable and b.event_ticker in combinable):
                 continue
-            est = model.estimate(a, b)
+            est = model.estimate(a, b, settings["model_leg_haircut"])
             if est is None:
-                continue
-            # WR/TE/RB templates: drop QB rushing-TD style legs.
-            skill_role = est.role_b if template == "nfl_qb_rec" else est.role_a
-            if template in ("nfl_skill_tt", "nfl_qb_rec") and skill_role.startswith("QB"):
                 continue
             indep = a.p * b.p
             lift = est.q / indep
-            if lift < settings["min_lift"] or est.q < 1 / settings["max_fair_x"]:
+            if template == PINNED_TEMPLATE:
+                max_fair_x = settings["pinned_max_fair_x"]
+            else:
+                max_fair_x = settings["mlb_max_fair_x"] if g.sport == "MLB" else settings["max_fair_x"]
+            if lift < settings["min_lift"] or est.q < 1 / max_fair_x:
                 continue
             game_rows.append({
                 "sport": g.sport, "game": g.key, "game_label": g.label, "start": g.start.isoformat(),
-                "template": template, "template_name": TEMPLATE_NAMES[template],
+                "template": template, "template_name": template_name(template),
                 "leg_a": _leg_view(a, est.role_a), "leg_b": _leg_view(b, est.role_b),
                 "p_a": a.p, "p_b": b.p, "indep_prob": indep, "indep_x": 1 / indep,
                 "q": est.q, "q_lo": est.q_lo, "q_hi": est.q_hi, "fair_x": 1 / est.q,
                 "rho": est.rho, "rho_lo": est.rho_lo, "rho_hi": est.rho_hi,
                 "n_hist": est.n, "n11": est.n11, "method": est.method, "lift": lift,
                 "wide_leg": max(a.spread, b.spread) > 0.06,
+                "_legs": (a, b),  # the exact legs to quote (a NO-side leg shares its YES ticker)
             })
-        rows += pick_diverse(game_rows, settings["max_quotes_per_game"], policy)
+        if settings["always_quote_hr_ml"]:
+            # Pinned rows are quoted every scan and don't use up the game's quote slots.
+            rows += [r for r in game_rows if r["template"] == PINNED_TEMPLATE]
+            game_rows = [r for r in game_rows if r["template"] != PINNED_TEMPLATE]
+        if g.sport == "MLB":
+            rows += pick_diverse(game_rows, settings["mlb_quotes_per_game"], policy, MLB_LONGSHOT_SHARE)
+        else:
+            rows += pick_diverse(game_rows, settings["max_quotes_per_game"], policy)
     return rows, n_pairs
 
 
@@ -184,12 +215,10 @@ async def run_scan(scan_id: int, model: Model):
             sem = asyncio.Semaphore(QUOTE_CONCURRENCY)
             done = 0
             _progress(scan_id, "Requesting Kalshi quotes", 0, len(rows))
-            leg_by_ticker = {leg.ticker: leg for g in games for leg in g.legs}
-
             async def quote(r):
                 nonlocal done, n_quoted
                 async with sem:
-                    a, b = leg_by_ticker[r["leg_a"]["ticker"]], leg_by_ticker[r["leg_b"]["ticker"]]
+                    a, b = r["_legs"]
                     try:
                         cq = await quote_combo(client, collection, a, b, settings["quote_size_dollars"],
                                                settings["quote_wait_seconds"])
@@ -209,10 +238,24 @@ async def run_scan(scan_id: int, model: Model):
         for r in rows:
             r.setdefault("stake", 0.0)
 
+        n_auto, auto_error = 0, None
+        if live and collection and settings["auto_bet_mode"] in ("dry_run", "live"):
+            _progress(scan_id, "Placing bets")
+            try:
+                attempts = await autobet.run(
+                    rows, client, collection, model.lineup_slots, settings,
+                    progress=lambda d, t: _progress(scan_id, "Placing bets", d, t))
+                n_auto = sum(r["auto_bet"]["status"] in ("placed", "paper") for r in attempts)
+            except Exception as e:  # never lose the scan's results over a betting error
+                traceback.print_exc()
+                auto_error = f"auto-bet: {type(e).__name__}: {e}"[:300]
+
+        for r in rows:
+            r.pop("_legs", None)
         db.save_results(scan_id, rows)
-        db.finish_scan(scan_id, "done", n_games=len(games), n_pairs=n_pairs, n_candidates=len(rows),
-                       n_quoted=n_quoted)
-        _progress(scan_id, "Done", len(rows), len(rows))
+        db.finish_scan(scan_id, "done", error=auto_error, n_games=len(games), n_pairs=n_pairs,
+                       n_candidates=len(rows), n_quoted=n_quoted)
+        _progress(scan_id, "Done", len(rows), len(rows), auto_bets=n_auto)
     except Exception as e:
         traceback.print_exc()
         db.finish_scan(scan_id, "error", error=f"{type(e).__name__}: {e}")

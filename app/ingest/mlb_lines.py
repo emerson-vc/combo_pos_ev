@@ -211,7 +211,7 @@ async def main():
     s = float((z * j["margin"]).sum() / (z * z).sum())  # OLS through origin: margin ≈ s·Φ⁻¹(p_win)
     j["exp_margin"] = s * z
     j["implied_runs"] = j["team_med"].fillna(j["total_med"] / 2 + j["exp_margin"] / 2)
-    out = j[["game_pk", "team", "p_win", "exp_margin", "implied_runs"]]
+    out = j[["game_pk", "team", "p_win", "exp_margin", "implied_runs"]].drop_duplicates(["game_pk", "team"])
     out.to_parquet(config.DATA_DIR / "mlb_lines.parquet", index=False)
 
     print(f"\nmatched {len(out):,} team-games ({out['implied_runs'].notna().sum():,} with implied runs); "

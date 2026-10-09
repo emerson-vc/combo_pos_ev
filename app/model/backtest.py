@@ -38,6 +38,25 @@ MLB_RESID = [  # team outcomes vs Kalshi pre-game expectation (data/mlb_lines.pa
     ("Top-order 2+ RBI & beats expected margin by 2+", "TOP", lambda f: f.rbi >= 2, lambda f: f.margin_resid > 2),
 ]
 MLB_RESID_SPLIT = "2026-07-15"
+# Pair families from the all-pairs search: (label, role prefix, A, B) on NFL player rows.
+NFL_WIDE = [
+    ("RB1 1+ TD & 70+ rush yds (same player)", "RB1", lambda f: f.td >= 1, lambda f: f.rush_yds >= 70),
+    ("WR1 6+ rec & 80+ rec yds (same player)", "WR1", lambda f: f.rec >= 6, lambda f: f.rec_yds >= 80),
+    ("RB1 first TD & team wins", "RB1", lambda f: f.first_td == 1, lambda f: f.won == 1),
+    ("QB1 40+ pass att & team loses", "QB1", lambda f: f.pass_att >= 40, lambda f: f.won == 0),
+]
+# (label, frame, A, B, residual column or None): new MLB combo types. Rows that use a residual
+# vs Kalshi's pre-game line only exist for 2026, so those use the in-season date split.
+MLB_NEW = [
+    ("SP 7+ K & team wins", "MLB_pitcher", lambda f: f.ks >= 7, lambda f: f.won == 1, None),
+    ("SP 8+ K & opponent under expectation", "MLB_pitcher", lambda f: f.ks >= 8,
+     lambda f: f.opp_runs_resid < 0, "opp_runs_resid"),
+    ("Leads after 5 & wins", "MLB_team", lambda f: f.f5_won == 1, lambda f: f.won == 1, None),
+    ("Run in 1st & game beats implied total", "MLB_game", lambda f: f.first_inning_runs >= 1,
+     lambda f: f.total_resid > 0, "total_resid"),
+    ("F5 total 6+ & game beats implied total by 3+", "MLB_game", lambda f: f.f5_total >= 6,
+     lambda f: f.total_resid > 3, "total_resid"),
+]
 
 
 def evaluate(label, frame, season_col, test_season, fa, fb, split=None) -> dict:
@@ -78,6 +97,33 @@ def main():
                 sub = r[r.bucket == bucket]
                 rows.append({"sport": "MLB resid", **evaluate(label, sub, "season", None, fa, fb,
                                                                split=sub["date"] >= MLB_RESID_SPLIT)})
+    if m.has("NFL"):
+        f = m.frames["NFL_player"]
+        weeks = f.groupby("season")["week"].max()
+        test = int(weeks[weeks >= 18].index.max())
+        for label, role, fa, fb in NFL_WIDE:
+            rows.append({"sport": f"NFL wide", **evaluate(label, f[f.role.str.startswith(role)], "season", test,
+                                                         fa, fb)})
+        g = m.frames["NFL_game"]
+        rows.append({"sport": "NFL wide", **evaluate("1H total 24+ & game beats total", g, "season", test,
+                                                     lambda x: x.h1_total >= 24, lambda x: x.total_resid > 0)})
+    if m.has("MLB"):
+        b = m.frames["MLB_player"]
+        mid = b[b.bucket == "MID"][["game_pk", "team", "player_id", "season", "hr"]]
+        pair = mid.merge(mid, on=["game_pk", "team", "season"], suffixes=("_a", "_b"))
+        pair = pair[pair.player_id_a < pair.player_id_b]
+        rows.append({"sport": "MLB wide", **evaluate("Mid-order teammates both 1+ HR", pair, "season",
+                                                     int(pair.season.max()), lambda x: x.hr_a >= 1,
+                                                     lambda x: x.hr_b >= 1)})
+    if "MLB_pitcher" in m.frames and "MLB_game" in m.frames:
+        for label, name, fa, fb, resid_col in MLB_NEW:
+            f = m.frames[name]
+            if resid_col:
+                f = f[f[resid_col].notna()]
+                row = evaluate(label, f, "season", None, fa, fb, split=f["date"] >= MLB_RESID_SPLIT)
+            else:
+                row = evaluate(label, f, "season", int(f["season"].max()), fa, fb)
+            rows.append({"sport": "MLB new", **row})
     df = pd.DataFrame(rows)
     pd.set_option("display.width", 200)
     fmt = {c: "{:.4f}".format for c in ["P(A)", "P(B)", "actual", "indep", "model"]}
