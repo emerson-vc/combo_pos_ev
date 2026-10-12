@@ -70,6 +70,14 @@ Kalshi's leg prices already include. See `nfl_edge_map.csv` and `mlb_edge_map.cs
 - **NO sides work in combos**, so opponent UNDER and player UNDER legs are in scope (e.g. SP Ks + opponent under).
 - **Payout slips slightly at bigger sizes**: always re-quote at the real stake before accepting (autobet already
   does) and log the slip per pair type.
+- **3-leg combos also price instantly**, so the same formula approach applies to N legs. Learn how d grows
+  with each added leg, not just per pair.
+- **The same combo's payout changes over minutes even when the leg prices don't move.** The formula has a
+  time-varying part: probably the maker's exposure, i.e. how much has already been bet on similar combos.
+  Consequences: (1) log every quote with a timestamp and re-quote the top candidates 2–3 times in a scan,
+  betting only when the price is at or better than its recent typical level; (2) record which combos get worse
+  after we bet them, to measure our own price impact; (3) less popular combos (not star HR + ML) are likely to
+  stay softer for longer.
 - **Scans stay manual** (only when Emerson clicks Scan). No scheduler.
 - **Daily loss limit: 20% of bankroll.** Set `daily_max_spend_pct` default to 0.20; keep 2%/bet and 5%/game.
 
