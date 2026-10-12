@@ -58,6 +58,21 @@ Kalshi's leg prices already include. See `nfl_edge_map.csv` and `mlb_edge_map.cs
 3. Teammate pairs are weak in MLB; in the NFL, QB + pass-catcher pairs are strong.
 4. Never combine a prop with a game under.
 
+## 2b. Decisions and facts from Emerson (10/12)
+- **Combo prices update instantly in the app** when a leg is added, so makers price them with an algorithm, not by
+  hand. Expect the makers' d to be nearly deterministic per pair type: try to recover the exact formula (e.g.
+  product of leg prices × a per-pair-type factor) instead of only averaging it. Instant quotes also mean
+  `quote_wait_seconds` can likely drop from 4s to about 1s; measure the real response time and use it, so a scan
+  can quote far more combos.
+- **Alt team totals combine with player props**: Freeman 2+ HR (47x) + Dodgers over 3.5 (1.9x) paid 95.24x,
+  more than the 89.3x the legs multiplied give (d = 0.94), while history says the true lift is about 1.9. So the
+  team-total version is as mispriced as the ML version. Sweep every alt rung.
+- **NO sides work in combos**, so opponent UNDER and player UNDER legs are in scope (e.g. SP Ks + opponent under).
+- **Payout slips slightly at bigger sizes**: always re-quote at the real stake before accepting (autobet already
+  does) and log the slip per pair type.
+- **Scans stay manual** (only when Emerson clicks Scan). No scheduler.
+- **Daily loss limit: 20% of bankroll.** Set `daily_max_spend_pct` default to 0.20; keep 2%/bet and 5%/game.
+
 ## 3. Phases
 
 ### Phase 0: Get the focus back (the regression since V1)
@@ -121,7 +136,8 @@ reserved 40% of MLB slots for long shots, and renamed the combo types, so the qu
 - Keep every existing cap and the dry run → live flow. Ask before changing any default risk limit.
 
 ### Phase 7: Timing
-- MLB: rescan after lineups post. NFL: rescan after inactives (about 90 min before kickoff).
+- Scans are manual. Show a hint in the UI when a better time to scan is near: MLB after lineups post, NFL after
+  inactives (about 90 min before kickoff).
 - Log how quotes for the same combo change between scans. If makers are slow to follow leg price moves,
   rescan right after big leg moves.
 
