@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 
-.PHONY: setup ingest ingest-mlb ingest-mlb-lines ingest-nfl discover run test backtest side-test
+.PHONY: setup ingest ingest-mlb ingest-mlb-lines ingest-nfl discover run test backtest side-test mine mine-report grade
 
 setup:
 	python3 -m venv .venv
@@ -24,6 +24,17 @@ discover:
 # One real $1 bet to learn which accepted_side buys YES. Without CONFIRM=1 it only explains.
 side-test:
 	$(PY) -m app.kalshi.side_test $(if $(CONFIRM),--confirm,)
+
+# Edge miner: quote combos in bulk, learn which types makers underprice, print the best bets. Never bets.
+# Options: make mine ARGS="--quotes 500 --legs 3 --sports NFL"
+mine:
+	$(PY) -m app.miner mine $(ARGS)
+
+mine-report:
+	$(PY) -m app.miner report
+
+grade:
+	$(PY) -m app.miner grade
 
 backtest:
 	$(PY) -m app.model.backtest

@@ -10,6 +10,7 @@ import math
 import numpy as np
 from scipy.optimize import brentq
 from scipy.special import ndtr, ndtri, owens_t
+from scipy.stats import multivariate_normal
 
 RHO_MAX = 0.999
 
@@ -33,6 +34,60 @@ def bvn_cdf(h: float, k: float, rho: float) -> float:
 
 def joint_prob(p_a: float, p_b: float, rho: float) -> float:
     return bvn_cdf(float(ndtri(p_a)), float(ndtri(p_b)), rho)
+
+
+def nearest_corr(r: np.ndarray, floor: float = 1e-6) -> np.ndarray:
+    """Closest valid correlation matrix: clip negative eigenvalues, then rescale to a unit diagonal.
+
+    Pairwise ρ fits are made on different historical pools, so together they need not be consistent.
+    """
+    r = (np.asarray(r, dtype=float) + np.asarray(r, dtype=float).T) / 2
+    w, v = np.linalg.eigh(r)
+    r = v @ np.diag(np.clip(w, floor, None)) @ v.T
+    d = np.sqrt(np.diag(r))
+    r = r / np.outer(d, d)
+    np.fill_diagonal(r, 1.0)
+    return r
+
+
+def _bvn_cdf_vec(h: np.ndarray, k: np.ndarray, rho: float) -> np.ndarray:
+    """Vectorized bvn_cdf over arrays h, k for one rho (|rho| < 1)."""
+    h = np.where(np.abs(h) > 1e-10, h, 1e-10)
+    k = np.where(np.abs(k) > 1e-10, k, 1e-10)
+    s = math.sqrt(1 - rho * rho)
+    beta = np.where(h * k > 0, 0.0, 0.5)
+    val = 0.5 * ndtr(h) + 0.5 * ndtr(k) - owens_t(h, (k - rho * h) / (h * s)) - owens_t(k, (h - rho * k) / (k * s)) - beta
+    return np.clip(val, 0.0, np.minimum(ndtr(h), ndtr(k)))
+
+
+_GL_X, _GL_W = np.polynomial.legendre.leggauss(96)
+
+
+def _trivariate(h: np.ndarray, r: np.ndarray) -> float:
+    """P(X1<h1, X2<h2, X3<h3): integrate over X1, with (X2, X3) | X1 bivariate normal (Gauss-Legendre)."""
+    r12, r13, r23 = (float(np.clip(x, -0.995, 0.995)) for x in (r[0, 1], r[0, 2], r[1, 2]))
+    s2, s3 = math.sqrt(1 - r12 ** 2), math.sqrt(1 - r13 ** 2)
+    rho = float(np.clip((r23 - r12 * r13) / (s2 * s3), -0.995, 0.995))
+    lo, hi = -8.5, float(h[0])
+    if hi <= lo:
+        return 0.0
+    x = (hi - lo) / 2 * _GL_X + (hi + lo) / 2
+    f = np.exp(-x * x / 2) / math.sqrt(2 * math.pi) * _bvn_cdf_vec((h[1] - r12 * x) / s2, (h[2] - r13 * x) / s3, rho)
+    return float((hi - lo) / 2 * np.sum(_GL_W * f))
+
+
+def joint_prob_n(ps: list[float], r: np.ndarray) -> float:
+    """P(all legs hit) for N binary legs under a Gaussian copula with correlation matrix r."""
+    if len(ps) == 2:
+        return joint_prob(ps[0], ps[1], float(r[0][1]))
+    h = ndtri(np.clip(np.asarray(ps, dtype=float), 1e-9, 1 - 1e-9))
+    r = nearest_corr(r)
+    if len(ps) == 3:
+        q = _trivariate(h, r)
+    else:
+        q = float(multivariate_normal(mean=np.zeros(len(ps)), cov=r, allow_singular=True, seed=0,
+                                      abseps=1e-6).cdf(h))
+    return min(max(q, 0.0), float(min(ps)))
 
 
 def rho_for_joint(p_a: float, p_b: float, p_ab: float) -> float:

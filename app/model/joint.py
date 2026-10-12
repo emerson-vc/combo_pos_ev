@@ -20,7 +20,7 @@ from scipy.stats import spearmanr
 
 from app import config
 from app.legs import GAME_KINDS, MODEL_LEG_HAIRCUT, PITCHER_KINDS, PLAYER_KINDS, Leg
-from app.model.copula import joint_prob, tetrachoric
+from app.model.copula import joint_prob, joint_prob_n, tetrachoric
 from app.model.ladder import Ladder
 
 # Player kinds with wide ranges: thresholds are quantile-matched instead of exact counts.
@@ -365,6 +365,36 @@ class Model:
         q_hi = joint_prob(a.p_hi(haircut), b.p_hi(haircut), stats["rho_hi"])
         return Estimate(q, q_lo, q_hi, stats["rho"], stats["rho_lo"], stats["rho_hi"], stats["n"], stats["n11"],
                         stats["role_a"], stats["role_b"], "copula")
+
+    def estimate_n(self, legs: list[Leg], haircut: float = MODEL_LEG_HAIRCUT) -> Estimate | None:
+        """Joint probability of 2+ same-game legs: pairwise ρ fits combined in one Gaussian copula.
+
+        None when any pair has no historical analogue or one leg implies another (subset pairs).
+        """
+        if len(legs) == 2:
+            return self.estimate(legs[0], legs[1], haircut)
+        k = len(legs)
+        r, r_lo, r_hi = np.eye(k), np.eye(k), np.eye(k)
+        n, n11, roles = [], [], {}
+        for i in range(k):
+            for j in range(i + 1, k):
+                est = self.estimate(legs[i], legs[j], haircut)
+                if est is None or est.rho is None:
+                    return None
+                r[i, j] = r[j, i] = est.rho
+                r_lo[i, j] = r_lo[j, i] = est.rho_lo
+                r_hi[i, j] = r_hi[j, i] = est.rho_hi
+                n.append(est.n)
+                n11.append(est.n11)
+        for leg in legs:
+            roles[leg.ticker] = self.role(leg)
+        q = joint_prob_n([leg.p for leg in legs], r)
+        q_lo = joint_prob_n([max(leg.p_lo(haircut), 1e-6) for leg in legs], r_lo)
+        q_hi = joint_prob_n([leg.p_hi(haircut) for leg in legs], r_hi)
+        rho = float(np.mean(r[np.triu_indices(k, 1)]))
+        return Estimate(q, min(q_lo, q), max(q_hi, q), rho, float(np.min(r_lo[np.triu_indices(k, 1)])),
+                        float(np.max(r_hi[np.triu_indices(k, 1)])), min(n), min(n11),
+                        "/".join(roles[leg.ticker] for leg in legs), "", "copula")
 
     def _fit(self, sport, a: Leg, b: Leg, role_a, role_b, pa, pb) -> dict | None:
         """Tetrachoric fit on the most specific historical pool with enough joint hits."""

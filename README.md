@@ -48,6 +48,24 @@ Without a key the app runs in **model-only** mode. You type the payout the Kalsh
 6. **Price**: EV = q / (price + fee) − 1, with fee = 0.07·P·(1−P). Stake = Kelly fraction × full
    Kelly × bankroll, capped per bet and per game.
 
+## Edge miner (`make mine`)
+
+Instead of hand-checking combos in the app, the miner does the searching:
+
+1. Builds every positively correlated 2-leg combo in each upcoming game (all rungs, YES and NO sides) plus
+   3-leg combos that extend the best pairs, within what the combo collection allows (`size_max`, YES-only events).
+2. Prices each with the joint model (3 legs: exact trivariate Gaussian copula from the pairwise fits).
+3. Predicts the makers' price as (legs multiplied) / d, where d is the correlation discount learned per combo type
+   from every quote so far (shrunk toward coarser types, starting at d = 1).
+4. Quotes in rounds of 40, sampling d from its uncertainty so unexplored types get tried and soft ones get quoted
+   more. Every quote is saved to the `quote_ledger` table, and the model refits after each round.
+5. Re-quotes the top 10 once to catch drift, then prints the top bets and a combo-type leaderboard
+   (`data/miner_top.csv`, `data/miner_types.csv`).
+
+`make mine` (default 300 quotes, leaves 500 of the weekly 5,000 combo creations untouched),
+`make mine ARGS="--quotes 600 --sports NFL"`, `make mine-report`, and `make grade` (grades settled combos so
+the leaderboard shows real hit rate and ROI per type). It never accepts a quote.
+
 ## Auto-betting (off by default)
 
 Settings bar → **Auto-bet**: Off / Dry run (paper bets) / Live. Only runs during scans you start:

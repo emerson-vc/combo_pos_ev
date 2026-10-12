@@ -33,6 +33,16 @@ CREATE TABLE IF NOT EXISTS bets (
     stake REAL NOT NULL, payout_x REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'open', pnl REAL, settled_at TEXT
 );
+-- Every combo the edge miner quoted (app/miner.py), graded once it settles.
+CREATE TABLE IF NOT EXISTS quote_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    quoted_at TEXT NOT NULL, run_id TEXT NOT NULL, sport TEXT NOT NULL, game TEXT NOT NULL,
+    start TEXT, type TEXT NOT NULL, n_legs INTEGER NOT NULL, legs TEXT NOT NULL,
+    combo_ticker TEXT, legs_x REAL NOT NULL, combo_x REAL, d REAL,
+    q REAL NOT NULL, q_lo REAL NOT NULL, ev REAL, ev_lo REAL, n_quotes INTEGER,
+    result TEXT, graded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS quote_ledger_type ON quote_ledger(type);
 """
 
 
@@ -266,3 +276,39 @@ def put_combo_legs(combo_ticker: str, legs: list[dict]):
 def delete_bet(bet_id: int):
     with connect() as c:
         c.execute("DELETE FROM bets WHERE id = ?", (bet_id,))
+
+
+# ---- edge-miner quote ledger --------------------------------------------------------------------
+
+LEDGER_COLS = ("quoted_at", "run_id", "sport", "game", "start", "type", "n_legs", "legs", "combo_ticker", "legs_x",
+               "combo_x", "d", "q", "q_lo", "ev", "ev_lo", "n_quotes")
+
+
+def add_ledger_row(row: dict) -> int:
+    vals = [json.dumps(row[k]) if k == "legs" else row.get(k) for k in LEDGER_COLS]
+    with connect() as c:
+        return c.execute(f"INSERT INTO quote_ledger ({', '.join(LEDGER_COLS)}) VALUES "
+                         f"({', '.join('?' * len(LEDGER_COLS))})", vals).lastrowid
+
+
+def ledger_rows(days: int | None = None, priced_only: bool = True) -> list[dict]:
+    sql, args = "SELECT * FROM quote_ledger WHERE 1=1", []
+    if days is not None:
+        sql += " AND quoted_at >= ?"
+        args.append((datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds"))
+    if priced_only:
+        sql += " AND d IS NOT NULL"
+    with connect() as c:
+        return [{**dict(r), "legs": json.loads(r["legs"])} for r in c.execute(sql + " ORDER BY id", args)]
+
+
+def ungraded_ledger_tickers() -> list[str]:
+    with connect() as c:
+        return [r[0] for r in c.execute("""SELECT DISTINCT combo_ticker FROM quote_ledger
+                                           WHERE result IS NULL AND combo_ticker IS NOT NULL""")]
+
+
+def grade_ledger(combo_ticker: str, result: str):
+    with connect() as c:
+        c.execute("UPDATE quote_ledger SET result = ?, graded_at = ? WHERE combo_ticker = ? AND result IS NULL",
+                  (result, now_iso(), combo_ticker))

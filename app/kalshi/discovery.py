@@ -86,6 +86,56 @@ async def find_combo_collection(client: KalshiClient) -> tuple[str, set[str]] | 
     return col["collection_ticker"], events
 
 
+@dataclass
+class ComboRules:
+    """What the combo collection allows: which events combine, YES-only events, leg limits, quoter counts."""
+    collection: str
+    events: set[str]
+    yes_only: set[str] = field(default_factory=set)
+    event_size_max: dict[str, int] = field(default_factory=dict)
+    size_max: int | None = None
+    quoters: dict[str, int] = field(default_factory=dict)
+
+    def allows(self, legs) -> bool:
+        if self.size_max is not None and len(legs) > self.size_max:
+            return False
+        per_event = Counter(leg.event_ticker for leg in legs)
+        for leg in legs:
+            if leg.event_ticker not in self.events:
+                return False
+            if leg.side == "no" and leg.event_ticker in self.yes_only:
+                return False
+            cap = self.event_size_max.get(leg.event_ticker)
+            if cap is not None and per_event[leg.event_ticker] > cap:
+                return False
+        return True
+
+
+async def combo_rules(client: KalshiClient) -> ComboRules | None:
+    cols = await client.paginate(
+        "/multivariate_event_collections", "multivariate_contracts",
+        {"status": "open", "series_ticker": config.COMBO_COLLECTION_SERIES, "limit": 200},
+    )
+    if not cols:
+        return None
+    col = cols[0]
+    rules = ComboRules(col["collection_ticker"], set(col.get("associated_event_tickers") or []),
+                       size_max=col.get("size_max"))
+    for e in col.get("associated_events") or []:
+        rules.events.add(e["ticker"])
+        if e.get("is_yes_only"):
+            rules.yes_only.add(e["ticker"])
+        if e.get("size_max") is not None:
+            rules.event_size_max[e["ticker"]] = int(e["size_max"])
+        q = e.get("active_quoters")
+        rules.quoters[e["ticker"]] = len(q) if isinstance(q, list) else int(q or 0)
+    if col.get("is_all_yes"):
+        rules.yes_only |= rules.events
+    if col.get("is_single_market_per_event"):
+        rules.event_size_max = {t: 1 for t in rules.events} | rules.event_size_max
+    return rules
+
+
 async def _main():
     client = KalshiClient()
     try:

@@ -107,7 +107,10 @@ def test_longshot_slots_reserved():
     assert sum(r["p_a"] <= 0.05 for r in picked) >= 4
 
 
-def test_hr_ml_combos_always_quoted(monkeypatch):
+def test_hr_ml_combos_always_quoted(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)  # build_candidates reads the rejected-combo cache
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "t.db")
+    db.init()
     from app import scan
     from app.legs import Leg
     from app.model.joint import Estimate

@@ -1,4 +1,4 @@
-"""Price a 2-leg combo on Kalshi: create (or reuse) the combo market, then RFQ for a quote.
+"""Price a combo (2+ legs) on Kalshi: create (or reuse) the combo market, then RFQ for a quote.
 
 Quoting never trades: RFQs are deleted after reading quotes. Accepting a quote (placing a bet)
 lives in app/kalshi/trading.py and only runs under the auto-bet rules.
@@ -31,13 +31,13 @@ class ComboQuote:
     quoted_at: float
 
 
-def legs_key(a: Leg, b: Leg) -> str:
+def legs_key(*legs: Leg) -> str:
     # YES legs keep the bare ticker so combos cached before NO legs existed still match.
-    return "|".join(sorted(leg.ticker if leg.side == "yes" else f"{leg.ticker}:no" for leg in (a, b)))
+    return "|".join(sorted(leg.ticker if leg.side == "yes" else f"{leg.ticker}:no" for leg in legs))
 
 
-async def combo_market(client: KalshiClient, collection: str, a: Leg, b: Leg) -> tuple[str, dict | None]:
-    key = legs_key(a, b)
+async def combo_market(client: KalshiClient, collection: str, *legs: Leg) -> tuple[str, dict | None]:
+    key = legs_key(*legs)
     cached = db.get_combo_ticker(key)
     if cached:
         if cached["market_ticker"] == REJECTED:
@@ -48,7 +48,7 @@ async def combo_market(client: KalshiClient, collection: str, a: Leg, b: Leg) ->
     try:
         resp = await client.post(f"/multivariate_event_collections/{collection}", {
             "selected_markets": [
-                {"market_ticker": leg.ticker, "event_ticker": leg.event_ticker, "side": leg.side} for leg in (a, b)
+                {"market_ticker": leg.ticker, "event_ticker": leg.event_ticker, "side": leg.side} for leg in legs
             ],
             "with_market_payload": True,
         })
@@ -56,6 +56,9 @@ async def combo_market(client: KalshiClient, collection: str, a: Leg, b: Leg) ->
         if e.status == 400 and "duplicated_legs" in str(e):
             db.put_combo_ticker(key, collection, REJECTED, "duplicated_legs")  # never ask again
             raise ComboRejected("Kalshi rejects this combination (one leg implies the other)") from e
+        if e.status == 400:  # any other leg-combination refusal: remember it too, with Kalshi's reason
+            db.put_combo_ticker(key, collection, REJECTED, str(e)[-120:])
+            raise ComboRejected(f"Kalshi rejects this combination: {e}") from e
         raise
     db.put_combo_ticker(key, collection, resp["market_ticker"], resp["event_ticker"])
     return resp["market_ticker"], resp.get("market")
@@ -109,7 +112,12 @@ async def collect_quotes(client: KalshiClient, rfq_id: str, wait_seconds: float)
 
 async def quote_combo(client: KalshiClient, collection: str, a: Leg, b: Leg, size_dollars: float,
                       wait_seconds: float) -> ComboQuote:
-    ticker, market = await combo_market(client, collection, a, b)
+    return await quote_legs(client, collection, (a, b), size_dollars, wait_seconds)
+
+
+async def quote_legs(client: KalshiClient, collection: str, legs: tuple[Leg, ...], size_dollars: float,
+                     wait_seconds: float) -> ComboQuote:
+    ticker, market = await combo_market(client, collection, *legs)
     if market is None:
         market = (await client.get(f"/markets/{ticker}")).get("market", {})
     book_ask = float(market.get("yes_ask_dollars") or 0)
